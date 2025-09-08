@@ -1,0 +1,33 @@
+# schema.yml
+meta:
+  id: example.v1
+  title: Ejemplo de esquema
+  version: 1.0.0
+
+models:
+  User:
+    type: object
+    description: Usuario del sistema
+    additionalProperties: false
+    properties:
+      id:        { type: uuid, required: true }
+      name:      { type: string, minLength: 2, maxLength: 80, required: true }
+      email:     { type: email, required: true }
+      age:       { type: integer, minimum: 0, maximum: 130 }
+      roles:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items:
+          enum: [admin, user, editor]
+      profile:
+        $ref: Profile
+    dependencies:
+      adminEmail: "roles includes 'admin' -> email required"
+
+  Profile:
+    type: object
+    additionalProperties: false
+    properties:
+      bio:      { type: string, maxLength: 280 }
+      website:  { type: url }
