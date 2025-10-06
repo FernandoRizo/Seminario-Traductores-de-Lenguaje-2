@@ -12,15 +12,19 @@ import importlib.util
 from dataclasses import dataclass
 from typing import List, Tuple
 
+import argparse
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 def here(*parts): return os.path.join(BASE, *parts)
+
+
 
 # === Carga módulos del usuario (desde la misma carpeta) ===
 def _load_module(name: str, path: str):
     path = os.path.abspath(path)
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"No pude cargar {name} desde {path}")
+        raise ImportError(f"No se pudo cargar {name} desde {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # type: ignore
     return module
@@ -32,6 +36,8 @@ Estado = simbolos_lexicos.Estado
 Terminal = simbolos_lexicos.Terminal
 NoTerminal = simbolos_lexicos.NoTerminal
 Pila = simbolos_lexicos.Pila
+
+
 
 # === Lee encabezados (símbolo -> columna) desde compilador.csv ===
 def load_symbol_headers(csv_path: str) -> Tuple[List[str], dict]:
@@ -78,6 +84,18 @@ def load_lr_table(lr_path: str):
         table.append(row[:num_cols])
     return num_rules, rules, num_rows, num_cols, table
 
+symbols, sym_to_col = load_symbol_headers(here("compilador.csv"))
+_, rules, nrows, ncols, table = load_lr_table(here("compilador.lr"))
+
+print(">> Columnas (CSV ↔ LR):")
+for i,s in enumerate(symbols):
+    print(f"  col {i}: '{s}'")
+
+# Ver la acción en estado 10 con ')'
+if ')' in sym_to_col:
+    print(">> ACTION[10,')'] =", table[10][sym_to_col[')']])
+else:
+    print(">> OJO: ')' no está en encabezado CSV")
 # === Mapeo del tipo de token (lexer) a terminal de la gramática ===
 TOKEN_TYPE_TO_TERMINAL = {
     'IDENTIFICADOR': 'identificador',
@@ -130,9 +148,12 @@ class LRParser:
                 sym = t.valor
             if sym is None:
                 raise ValueError(f"No puedo mapear el token: tipo={t.tipo} valor={t.valor}")
+            if sym not in self.sym_to_col:
+                raise ValueError(f"Símbolo '{sym}' no se encuentra en el compilador")
             mapped.append((sym, self.sym_to_col[sym]))
         mapped.append(('$', self.sym_to_col['$']))
         return mapped
+    
 
     def parse(self, code: str, trace: bool = True):
         stack = Pila()
@@ -183,23 +204,74 @@ class LRParser:
                 steps.append(TraceStep(step_no, stack_str(), look_sym, act, note))
             step_no += 1
 
+
+def _leer_fuente_desde_cli() -> str:
+    """
+    Prioridad:
+    1) --file RUTA  (o -f RUTA)
+    2) primer argumento si es ruta existente
+    3) primer argumento como código literal
+    4) stdin si hay contenido redirigido
+    5) cadena vacía (epsilon)
+    """
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("-f", "--file", dest="file", help="Code.c")
+    ap.add_argument("src", nargs="?", help="Código literal o ruta")
+    ap.add_argument("--trace", dest="trace", type=int, default=30, help="Cuántos pasos imprimir (por defecto 30)")
+    ap.add_argument("--help", action="store_true")
+    args, _ = ap.parse_known_args()
+
+    if args.help:
+        print("Uso:")
+        print("  python lr_parser_driver.py \"int x ;\"")
+        print("  python lr_parser_driver.py ruta/al/archivo.c")
+        print("  python lr_parser_driver.py -f ruta/al/archivo.c")
+        print("  type archivo.c | python lr_parser_driver.py   (Windows)")
+        print("  cat archivo.c | python3 lr_parser_driver.py   (Linux/Mac)")
+        sys.exit(0)
+
+    # 1) flag -f/--file
+    if args.file:
+        with open(args.file, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
+    # 2) si el primer argumento es ruta existente -> léelo como archivo
+    if args.src and os.path.isfile(args.src):
+        with open(args.src, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
+    # 3) si hay argumento y no es archivo -> trátalo como código literal
+    if args.src:
+        return args.src
+
+    # 4) si llega por stdin (pipe/redirect)
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+
+    # 5) sin entrada -> epsilon
+    return ""
+
 def main():
     symbols, sym_to_col = load_symbol_headers(here("compilador.csv"))
     _, rules, nrows, ncols, table = load_lr_table(here("compilador.lr"))
+
+    # (opcional) chequeos anti-desalineo CSV/LR
+    if ncols != len(symbols):
+        raise ValueError(f"Desalineado: LR declara {ncols} columnas y CSV tiene {len(symbols)} símbolos.")
+
     parser = LRParser(table, rules, symbols, sym_to_col)
 
-    if len(sys.argv) >= 2:
-        src = sys.argv[1]
-    else:
-        src = ""  # ε
+    src = _leer_fuente_desde_cli()
     ok, steps, msg = parser.parse(src, trace=True)
+
     print("=== Resultado ===")
     print(msg)
     print("=== Trazas (primeras 30) ===")
-    for s in steps[:30]:
+    for s in steps[:200]:
         print(f"[{s.step:03}] {s.stack_repr:<60}  ⟂ {s.lookahead:<10}  act={s.action:>3}  {s.note}")
-    if len(steps) > 30:
+    if len(steps) > 200:
         print(f"... ({len(steps)-30} pasos más)")
+
 
 if __name__ == "__main__":
     main()

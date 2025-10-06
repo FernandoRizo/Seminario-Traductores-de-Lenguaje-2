@@ -11,12 +11,14 @@ class Tok:
     columna: int
 
 # Palabras reservadas
-RESERVADAS_TIPO = {"int", "float", "char", "void"}
+RESERVADAS_TIPO = {"int", "float", "char", "void",}
 RESERVADAS = {
     "if": "IF",
     "while": "WHILE",
     "return": "RETURN",
     "else": "ELSE",
+    #"return" : "RETURN",
+    #"main" : "MAIN"
 }
 
 # Regex base
