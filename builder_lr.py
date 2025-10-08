@@ -239,7 +239,7 @@ for I in C:
     # reduces
     for (A,alpha,dot,beta) in I:
         if A==AUG_START and beta==() and not alpha:
-            # no debería pasar aquí
+            
             pass
         if beta == ():
             if A == AUG_START and alpha == (START,):
