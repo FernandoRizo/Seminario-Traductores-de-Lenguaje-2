@@ -1,157 +1,149 @@
 # -*- coding: utf-8 -*-
-
 import re
+from dataclasses import dataclass
+from typing import List
 
-# --------------------------------------------------
-# Clase Token
-# --------------------------------------------------
-class Token:
-    
-    def __init__(self, tipo, valor, tipo_num):
-        self.tipo = tipo
-        self.valor = valor
-        self.tipo_num = tipo_num
+@dataclass
+class Tok:
+    tipo: str
+    valor: str
+    linea: int
+    columna: int
 
-    def __str__(self):
-        # Representación en formato de tabla para una fácil lectura.
-        return f'| {self.valor:<15} | {self.tipo:<20} | {self.tipo_num:<5} |'
+# Palabras reservadas
+RESERVADAS_TIPO = {"int", "float", "char", "void",}
+RESERVADAS = {
+    "if": "IF",
+    "while": "WHILE",
+    "return": "RETURN",
+    "else": "ELSE",
+    #"return" : "RETURN",
+    #"main" : "MAIN"
+}
 
-# --------------------------------------------------
-# Analizador Léxico
-# --------------------------------------------------
-def analizador_lexico(codigo):
-    """
-    Esta función toma una cadena de código como entrada y la divide en tokens.
-    """
-    
-    # Lista de especificaciones de tokens en formato (TIPO, regex, VALOR_NUMERICO)
+# Regex base
+_espacios = re.compile(r'[ \t\r]+')
+_nl       = re.compile(r'\n')
+_ident    = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_entero   = re.compile(r'[0-9]+')
+_real     = re.compile(r'(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+')
+_cadena   = re.compile(r'"(?:[^"\\]|\\.)*"')
 
-    especificaciones = [
-        ('ESPACIO',         r'\s+',                     -1),
-        ('COMENTARIO',      r'//.*',                    -1),
-
-        # Cadena (simple, no cruza línea). Acepta escapes tipo \" \\ \n \t \r
-        ('CADENA',          r'"([^"\\\n]|\\.)*"',       3),
-
-        ('REAL',            r'\d+\.\d+',                2),
-        ('ENTERO',          r'\d+',                     1),
-
-        # Dos caracteres primero
-        ('OP_AND',          r'&&',                      9),
-        ('OP_OR',           r'\|\|',                    8),
-        ('OP_IGUALDAD',     r'==|!=',                   11),
-        ('OP_RELAC',        r'<=|>=|<|>',               7),
-
-        # Un carácter
-        ('ASIGNACION',      r'=',                       18),
-        ('OP_SUMA',         r'\+|-',                    5),
-        ('OP_MUL',          r'\*|/',                    6),
-        ('OP_NOT',          r'!',                       10),
-
-        # Delimitadores
-        ('PUNTO_Y_COMA',    r';',                       12),
-        ('COMA',            r',',                       13),
-        ('PARENTESIS_IZQ',  r'\(',                      14),
-        ('PARENTESIS_DER',  r'\)',                      15),
-        ('LLAVE_IZQ',       r'\{',                      16),
-        ('LLAVE_DER',       r'\}',                      17),
-
-        ('FIN',             r'\$',                      23),
-
-       
-        ('IDENTIFICADOR',   r'[A-Za-z_][A-Za-z0-9_]*',  0),
-
-        ('ERROR',           r'.',                       -1),
-    ]
-
-    palabras_reservadas = {
-        'if':     ('IF', 19),
-        'while':  ('WHILE', 20),
-        'return': ('RETURN', 21),
-        'else':   ('ELSE', 22),
-        'int':    ('TIPO', 4),
-        'float':  ('TIPO', 4),
-        'void':   ('TIPO', 4),  
-    }
-
-
-    # Une todas las expresiones regulares en una sola.
-    regex_unida = '|'.join(f'(?P<{tipo}>{regex})' for tipo, regex, _ in especificaciones)
-    
-    tokens_encontrados = []
+def analizador_lexico(src: str) -> List[Tok]:
+    i = 0
     linea = 1
-    columna = 1
+    col = 1
+    n = len(src)
+    toks: List[Tok] = []
 
-    # Recorre todas las coincidencias en el código.
-    for match in re.finditer(regex_unida, codigo):
-        tipo_token = match.lastgroup
-        valor = match.group()
-        
-        # Actualiza la columna para el seguimiento de errores.
-        columna = match.start()
+    def adv(m):
+        nonlocal i, col, linea
+        s, e = m.span()
+        texto = src[s:e]
+        i = e
+        col += (e - s)
+        return texto
 
-        if tipo_token == 'ESPACIO' or tipo_token == 'COMENTARIO':
-            # Ignora los espacios y comentarios
-            if '\n' in valor:
-                linea += valor.count('\n')
+    while i < n:
+        # saltar espacios y comentarios
+        m = _espacios.match(src, i)
+        if m:
+            adv(m)
             continue
-        
-        elif tipo_token == 'IDENTIFICADOR':
-            # Si es un identificador, verifica si es una palabra reservada.
-            if valor in palabras_reservadas:
-                tipo, tipo_num = palabras_reservadas[valor]
-                tokens_encontrados.append(Token(tipo, valor, tipo_num))
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            if j < 0: j = n
+            col += (j - i)
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i+2)
+            if j < 0:
+                raise ValueError(f"Error léxico: comentario no cerrado en línea {linea}, columna {col}")
+            # contar saltos de línea dentro del comentario
+            comentario = src[i:j+2]
+            nl_count = comentario.count("\n")
+            if nl_count:
+                linea += nl_count
+                col = len(comentario.split("\n")[-1]) + 1
             else:
-                tokens_encontrados.append(Token('IDENTIFICADOR', valor, 0)) 
-        
-        elif tipo_token == 'ERROR':
-            print(f"Error: Carácter no reconocido '{valor}' en la línea {linea}, columna {columna}")
-        
-            
-        else:
-            # Para cualquier otro token, busca su tipo numérico en la lista de especificaciones.
-            for tipo_spec, _, tipo_num_spec in especificaciones:
-                if tipo_spec == tipo_token:
-                    tokens_encontrados.append(Token(tipo_token, valor, tipo_num_spec))
-                    break
-    
-    return tokens_encontrados
+                col += len(comentario)
+            i = j + 2
+            continue
 
-# --------------------------------------------------
-# Código de Prueba
-# --------------------------------------------------
-if __name__ == '__main__':
-    
-    # Código de ejemplo para probar el analizador
-    codigo_fuente = """
-   
-    int main() {
-        int resultado = 0;
-        float numero_real = 10.5;
-        
-        if (resultado >= 0 && numero_real > 10.0) {
-            resultado = resultado + 1;
-        } else {
-            return 0;
+        # saltos de línea
+        m = _nl.match(src, i)
+        if m:
+            adv(m)
+            linea += 1
+            col = 1
+            continue
+
+        # tokens complejos
+        m = _real.match(src, i)
+        if m:
+            lex = adv(m)
+            toks.append(Tok("REAL", lex, linea, col - len(lex)))
+            continue
+
+        m = _entero.match(src, i)
+        if m:
+            lex = adv(m)
+            toks.append(Tok("ENTERO", lex, linea, col - len(lex)))
+            continue
+
+        m = _cadena.match(src, i)
+        if m:
+            lex = adv(m)
+            toks.append(Tok("CADENA", lex, linea, col - len(lex)))
+            continue
+
+        m = _ident.match(src, i)
+        if m:
+            lex = adv(m)
+            if lex in RESERVADAS_TIPO:
+                toks.append(Tok("TIPO", lex, linea, col - len(lex)))
+            elif lex in RESERVADAS:
+                toks.append(Tok(RESERVADAS[lex], lex, linea, col - len(lex)))
+            else:
+                toks.append(Tok("IDENTIFICADOR", lex, linea, col - len(lex)))
+            continue
+
+        # Operadores (ordena por los de 2 chars primero)
+        two = src[i:i+2]
+        one = src[i]
+
+        if two in ("==", "!=", "<=", ">=", "&&", "||"):
+            tipo = {
+                "&&": "OP_AND", "||": "OP_OR",
+                "==": "OP_IGUALDAD", "!=": "OP_IGUALDAD",
+                "<=": "OP_RELAC", ">=": "OP_RELAC",
+            }[two]
+            toks.append(Tok(tipo, two, linea, col))
+            i += 2; col += 2
+            continue
+
+        if one in "+-":
+            toks.append(Tok("OP_SUMA", one, linea, col)); i+=1; col+=1; continue
+        if one in "*/%":
+            toks.append(Tok("OP_MUL", one, linea, col)); i+=1; col+=1; continue
+        if one in "<>":
+            toks.append(Tok("OP_RELAC", one, linea, col)); i+=1; col+=1; continue
+        if one == "!":
+            toks.append(Tok("OP_NOT", "!", linea, col)); i+=1; col+=1; continue
+        if one == "=":
+            toks.append(Tok("ASIGNACION", "=", linea, col)); i+=1; col+=1; continue
+
+        # Puntuación
+        mapa_punc = {
+            ";": "PUNTO_Y_COMA", ",": "COMA",
+            "(": "PARENTESIS_IZQ", ")": "PARENTESIS_DER",
+            "{": "LLAVE_IZQ",     "}": "LLAVE_DER",
         }
-        
-        while(resultado < 5) {
-            resultado = resultado + 1;
-        }
-        
-        // Fin del programa
-        return resultado;
-    }
-    
-    """
-    
-    # Obtenemos la lista de tokens
-    lista_de_tokens = analizador_lexico(codigo_fuente)
-    
-    # Imprimimos la tabla de resultados
-    print('-' * 55)
-    print('| Lexema          | Tipo de Token        | Valor Numérico |')
-    print('-' * 55)
-    for token in lista_de_tokens:
-        print(token)
-    print('-' * 55)
+        if one in mapa_punc:
+            toks.append(Tok(mapa_punc[one], one, linea, col)); i+=1; col+=1; continue
+
+        # Si llegamos aquí, carácter inválido
+        raise ValueError(f"Error léxico: carácter inválido '{src[i]}' en línea {linea}, columna {col}")
+
+    return toks

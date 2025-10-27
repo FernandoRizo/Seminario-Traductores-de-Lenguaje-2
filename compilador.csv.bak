@@ -1,0 +1,1 @@
+tipo,identificador,entero,(,),{,},;,",",=,return,opSuma,$,cadena,Program,DeclList,Decl,VarDecl,FunDef,ParamListOpt,ParamList,Param,Block,StmtListOpt,StmtList,Stmt,Assign,Return,Expr,Term,Factor,Call,ArgListOpt,ArgList
