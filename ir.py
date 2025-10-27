@@ -22,27 +22,67 @@ class IR:
         return f"{base}{self.label_i}"
 
 def gen_expr(ir: IR, node) -> str:
-    # Devuelve el nombre del temporal/variable donde queda el valor
+    # Devuelve el nombre del temporal/variable/literal donde queda el valor
     if node.type == "Num":
         t = ir.new_temp()
         ir.emit(("=", str(node.value), None, t))
         return t
+
     if node.type == "Var":
         return node.name
+
+    if node.type == "String":
+        # reservar literal en el pool: STR1, STR2, ...
+        label = ir.new_label("STR")
+        ir.emit(("strlit", node.value, None, label))  # (texto, -, label)
+        return label  # representará su dirección
+
     if node.type == "BinOp":
         a = gen_expr(ir, node.left)
         b = gen_expr(ir, node.right)
         t = ir.new_temp()
         ir.emit((node.op, a, b, t))  # '+','-','*','/','<','>','<=','>=','==','!='
         return t
+
     if node.type == "Call":
-        # empuja parámetros en orden derecha→izquierda
-        for arg in reversed(node.args):
+        # Caso especial: printf(...)
+        if node.name == "printf":
+            args = [gen_expr(ir, a) for a in node.args or []]
+            if len(args) == 1:
+                # printf(x) -> imprime entero x
+                ir.emit(("printf_i", args[0], None, None))
+                t = ir.new_temp()
+                ir.emit(("=", "0", None, t))  # valor de retorno ficticio
+                return t
+            elif len(args) >= 2:
+                # printf("%d\n", x)  -> imprime entero x y salto de línea
+                # (ignoramos la cadena de formato y asumimos %d\n)
+                fmt, val = args[0], args[1]
+                ir.emit(("printf_si", fmt, val, None))
+                t = ir.new_temp()
+                ir.emit(("=", "0", None, t))
+                return t
+            else:
+                # sin args: no imprimimos nada
+                t = ir.new_temp()
+                ir.emit(("=", "0", None, t))
+                return t
+
+        # Caso especial: getchar()
+        if node.name == "getchar":
+            ir.emit(("getchar", None, None, None))
+            t = ir.new_temp()
+            ir.emit(("=", "0", None, t))
+            return t
+
+        # Llamada normal: empuja parámetros derecha→izquierda
+        for arg in reversed(node.args or []):
             v = gen_expr(ir, arg)
             ir.emit(("param", v, None, None))
         t = ir.new_temp()
-        ir.emit(("call", node.name, str(len(node.args)), t))
+        ir.emit(("call", node.name, str(len(node.args or [])), t))
         return t
+
     raise NotImplementedError(node.type)
 
 def gen_stmt(ir: IR, node):

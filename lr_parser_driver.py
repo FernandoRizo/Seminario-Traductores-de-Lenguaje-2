@@ -32,6 +32,17 @@ Terminal = simbolos_lexicos.Terminal
 NoTerminal = simbolos_lexicos.NoTerminal
 Pila = simbolos_lexicos.Pila
 
+# Ignora librerías
+def _preprocess_fuente(src: str) -> str:
+    out = []
+    for line in src.splitlines():
+        s = line.lstrip()
+        # 1) ignora preprocesador (#include, #define, etc.)
+        if s.startswith('#'):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
 def _rhs_symbols_from_stack(stack, rhs_len):
     """
     Devuelve los símbolos (string) del RHS en orden izq→der,
@@ -51,14 +62,41 @@ def _rhs_symbols_from_stack(stack, rhs_len):
 
 
 # === Lee encabezados (símbolo -> columna) desde compilador.csv ===
-def load_symbol_headers(csv_path: str) -> Tuple[List[str], dict]:
-    with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+def load_symbol_headers(csv_path: str, expected_ncols: int | None = None) -> Tuple[List[str], dict]:
+    """
+    Lee la cabecera de compilador.csv respetando comillas (csv.reader) y
+    maneja ambos formatos:
+      A) cabecera SIN columna de 'estado'  -> símbolos = header
+      B) cabecera CON primera celda vacía/'estado' -> símbolos = header[1:]
+    Si expected_ncols está dado, elige la variante que coincida.
+    """
+    with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
-    symbols = header[1:]  # la primera columna es el estado
+
+    # normaliza espacios
+    header = [h.strip() for h in header]
+
+    # candidatos
+    cand_all  = header                      # sin descartar nada
+    cand_skip = header[1:] if len(header) else header  # descartando la 1ª celda
+
+    def choose():
+        # 1) si nos dieron expected_ncols, usa el que calce
+        if expected_ncols is not None:
+            if len(cand_all) == expected_ncols:
+                return cand_all
+            if len(cand_skip) == expected_ncols:
+                return cand_skip
+        # 2) heurística: si la 1ª celda está vacía o dice 'estado'/'state' -> skip
+        if header and header[0].lower() in ("", "estado", "state"):
+            return cand_skip
+        # 3) por defecto, usa la cabecera completa
+        return cand_all
+
+    symbols = choose()
     mapping = {sym: idx for idx, sym in enumerate(symbols)}
     return symbols, mapping
-
 # === Lee la máquina LR desde compilador.lr ===
 def load_lr_table(lr_path: str):
     lines = []
@@ -151,8 +189,10 @@ class LRParser:
         self.sym_to_col = sym_to_col
 
     def _tokenize(self, code: str):
+        code = _preprocess_fuente(code)
         toks = AnalizadorLexico.analizador_lexico(code)
         mapped = []
+        
         for t in toks:
             sym = TOKEN_TYPE_TO_TERMINAL.get(t.tipo)
             if sym is None and t.valor in self.sym_to_col:
@@ -178,26 +218,15 @@ class LRParser:
     
 
     def parse(self, code: str, trace: bool = True):
-        # Acciones semánticas (dict por clave textual de producción)
+        """
+        Devuelve (ok: bool, steps: List[TraceStep], result: AST | str_mensaje_error)
+        SIEMPRE regresa un triple, aun en errores y excepciones.
+        """
+        # Acciones semánticas
         ACTIONS = _make_actions()
 
-        stack = Pila()
-        stack.push(Estado(0))
-        input_syms = self._tokenize(code)
-        ip = 0
-        steps: List[TraceStep] = []
-        step_no = 0
-
-        # pila de valores semánticos paralela
-        sem_stack: List[object] = []
-
-        def stack_str() -> str:
-            return str(stack)
-
-        # Necesitamos reconstruir el orden textual de reglas (para nombrar la producción)
-        # Esta lista DEBE reflejar el mismo orden de RULE_LIST en builder_lr.py
+        # Tabla de producciones (debe coincidir con builder_lr.py)
         PRODUCCIONES = [
-            # 1..N (sin la aumentada)
             ("Program",      ("DeclList",)),
             ("DeclList",     ("DeclList","Decl")),
             ("DeclList",     ("Decl",)),
@@ -205,13 +234,13 @@ class LRParser:
             ("Decl",         ("FunDef",)),
             ("VarDecl",      ("tipo","identificador",)),
             ("FunDef",       ("tipo","identificador","(","ParamListOpt",")","Block")),
-            ("ParamListOpt", ()),                         # ε
+            ("ParamListOpt", ()),
             ("ParamListOpt", ("ParamList",)),
             ("ParamList",    ("Param",)),
             ("ParamList",    ("ParamList",",","Param")),
             ("Param",        ("tipo","identificador")),
             ("Block",        ("{","StmtListOpt","}")),
-            ("StmtListOpt",  ()),                         # ε
+            ("StmtListOpt",  ()),
             ("StmtListOpt",  ("StmtList",)),
             ("StmtList",     ("Stmt",)),
             ("StmtList",     ("StmtList","Stmt")),
@@ -228,75 +257,121 @@ class LRParser:
             ("Factor",       ("(","Expr",")")),
             ("Factor",       ("Call",)),
             ("Call",         ("identificador","(","ArgListOpt",")")),
-            ("ArgListOpt",   ()),                         # ε
+            ("ArgListOpt",   ()),
             ("ArgListOpt",   ("ArgList",)),
             ("ArgList",      ("Expr",)),
             ("ArgList",      ("ArgList",",","Expr")),
         ]
+
+        # Estructuras de ejecución
+        stack = Pila()
+        stack.push(Estado(0))
+        try:
+            input_syms = self._tokenize(code)
+        except Exception as e:
+            # falló el lexer o el mapeo de tokens
+            return False, [], f"[Tokenize] {e}"
+
+        ip = 0
+        sem_stack: List[object] = []
         steps: List[TraceStep] = []
         step_no = 0
-        ok = False
-        msg = "Error inesperado"
 
         MAX_STEPS = 20000
 
-        while True:
-            if step_no > MAX_STEPS:
-                steps.append(TraceStep(step_no, str(stack), "<guard>", 0, "ABORT: demasiados pasos"))
-                ok = False
-                msg = "Bucle detectado (demasiados pasos)"
-                break
+        try:
+            while True:
+                if step_no > MAX_STEPS:
+                    steps.append(TraceStep(step_no, str(stack), "<guard>", 0, "ABORT: demasiados pasos"))
+                    return False, steps, "Bucle detectado (demasiados pasos)"
 
-            state = stack.top().id
-            look_sym, look_col, look_lex = input_syms[ip]
-            act = self.table[state][look_col]
-            note = ""
+                state = stack.top().id
+                look_sym, look_col, look_lex = input_syms[ip]
+                act = self.table[state][look_col]
 
-            if act == 0:
-                note = "ERROR"
-                steps.append(TraceStep(step_no, str(stack), look_sym, act, note))
-                ok = False
-                msg = f"Error sintáctico en estado {state} con símbolo '{look_sym}'"
-                break
+                if act == 0:
+                    steps.append(TraceStep(step_no, str(stack), look_sym, act, "ERROR"))
+                    return False, steps, f"Error sintáctico en estado {state} con símbolo '{look_sym}'"
 
-            if act > 0:
-                # SHIFT
-                stack.push(Terminal(look_sym))
-                stack.push(Estado(act))
-                ip += 1
-                note = f"shift → estado {act}"
+                if act > 0:
+                    # SHIFT
+                    stack.push(Terminal(look_sym))
+                    stack.push(Estado(act))
+                    sem_stack.append(look_lex)
+                    ip += 1
+                    steps.append(TraceStep(step_no, str(stack), look_sym, act, f"shift → estado {act}"))
+                    step_no += 1
+                    continue
 
-            elif act == -1:
-                # ACCEPT (no retornes aquí; registra y rompe)
-                note = "ACCEPT"
-                steps.append(TraceStep(step_no, str(stack), look_sym, act, note))
-                ok = True
-                msg = "Cadena aceptada"
-                break
+                if act == -1:
+                    steps.append(TraceStep(step_no, str(stack), look_sym, act, "ACCEPT"))
+                    root = sem_stack[-1] if sem_stack else None
+                    return True, steps, root
 
-            else:
                 # REDUCE
                 rule_no = -act - 1
                 lhs_id, rhs_len, lhs_name = self.rules[rule_no - 1]
+
+                # Toma los símbolos reales del RHS (izq→der) desde la pila LR ANTES de hacer pop:
+                rhs_syms = _rhs_symbols_from_stack(stack, rhs_len)  # ← usa tu helper
+
+                # ahora sí, saca 2*rhs_len (símbolo,estado) de la pila LR
                 for _ in range(rhs_len):
                     stack.pop(); stack.pop()
+
+                # valores semánticos del RHS (en el mismo orden izq→der)
+                if len(sem_stack) < rhs_len:
+                    rhs_str = "/* vacío */" if rhs_len == 0 else " ".join(rhs_syms)
+                    steps.append(TraceStep(step_no, str(stack), look_sym, act,
+                                        f"reduce R{rule_no} → pila semántica insuficiente"))
+                    msg = (f"[Reduce] Regla #{rule_no} → {lhs_name} → {rhs_str}\n"
+                        f"rhs_len={rhs_len}, len(sem_stack)={len(sem_stack)}")
+                    return False, steps, msg
+
+                rhs_vals = sem_stack[-rhs_len:] if rhs_len > 0 else []
+                if rhs_len > 0:
+                    del sem_stack[-rhs_len:]
+
+                # arma la clave EXACTA de la acción semántica usando los símbolos reales
+                key = f"{lhs_name} → " + ("/* vacío */" if rhs_len == 0 else " ".join(rhs_syms))
+
+                if key in ACTIONS:
+                    try:
+                        node = ACTIONS[key](rhs_vals)
+                    except Exception as e:
+                        steps.append(TraceStep(step_no, str(stack), look_sym, act,
+                                            f"reduce R{rule_no} → error en acción"))
+                        msg = (f"[Reduce] Regla #{rule_no} → {key}\n"
+                            f"rhs_len={rhs_len}, rhs_vals={rhs_vals}\n"
+                            f"Error: {e}")
+                        return False, steps, msg
+                else:
+                    # fallback: si hay un solo valor, propágalo; si no, None
+                    node = rhs_vals[0] if rhs_len == 1 else None
+
+                sem_stack.append(node)
+
+
+                # GOTO
                 top_state = stack.top().id
                 goto_state = self.table[top_state][lhs_id]
                 if goto_state <= 0:
-                    note = f"reduce R{rule_no} → GOTO inválido"
-                    steps.append(TraceStep(step_no, str(stack), look_sym, act, note))
-                    ok = False
-                    msg = f"Error en GOTO después de R{rule_no} (top_state={top_state}, lhs_id={lhs_id})"
-                    break
+                    steps.append(TraceStep(step_no, str(stack), look_sym, act, f"reduce R{rule_no} → GOTO inválido"))
+                    return False, steps, f"Error en GOTO después de R{rule_no} (top_state={top_state}, lhs_id={lhs_id})"
+
                 stack.push(NoTerminal(lhs_name))
                 stack.push(Estado(goto_state))
-                note = f"reduce R{rule_no}: {lhs_name} (|rhs|={rhs_len}) → goto {goto_state}"
+                steps.append(TraceStep(step_no, str(stack), look_sym, act,
+                                    f"reduce R{rule_no}: {lhs_name} (|rhs|={rhs_len}) → goto {goto_state}"))
+                step_no += 1
 
-            # ⬇⬇ SIEMPRE registra el paso al final de la iteración
-            steps.append(TraceStep(step_no, str(stack), look_sym, act, note))
-            step_no += 1
+        except Exception as e:
+            # Cualquier excepción inesperada se devuelve como error legible
+            return False, steps, f"[Excepción] {type(e).__name__}: {e}"
 
-        return ok, steps, msg
+        # Salvaguarda: si saliera del while sin devolver (no debería), forzamos retorno de error.
+        return False, steps, "Terminación inesperada del analizador"
+
 
 
 def _leer_fuente_desde_cli() -> str:
@@ -364,6 +439,8 @@ def _make_actions():
 
     # VarDecl (sin ;)
     A["VarDecl → tipo identificador"] = lambda rhs: ("vardecl", rhs[1])
+    A["Stmt → Expr ;"] = lambda rhs: ExprStmt(expr=rhs[0])
+    A["Factor → cadena"] = lambda rhs: String(value=rhs[0])
 
     def _fun_def(rhs):
         # Acepta len 6 (con paréntesis) o len 4 (sin subirlos a la pila)
@@ -438,16 +515,17 @@ def main():
 
     src, args = _leer_fuente_desde_cli()
 
-    symbols, sym_to_col = load_symbol_headers(here("compilador.csv"))
     _, rules, nrows, ncols, table = load_lr_table(here("compilador.lr"))
+    symbols, sym_to_col = load_symbol_headers(here("compilador.csv"), expected_ncols=ncols)
+
 
    
     if getattr(args, "dump_lr", False):
         print(">> Columnas (CSV ↔ LR):")
-    for i,s in enumerate(symbols):
-        print(f"  col {i}: '{s}'")
-    if ')' in sym_to_col and len(table) > 10:
-        print(">> ACTION[10,')'] =", table[10][sym_to_col[')']])
+        for i,s in enumerate(symbols):
+            print(f"  col {i}: '{s}'")
+        if ')' in sym_to_col and len(table) > 10:
+            print(">> ACTION[10,')'] =", table[10][sym_to_col[')']])
 
 
     if ncols != len(symbols):
@@ -467,6 +545,17 @@ def main():
 
 
     print("=== Resultado ===")
+    if not ok:
+        print(result)
+        print("=== Trazas (primeras 200) ===")
+        for s in steps[:200]:
+            print(f"[{s.step:03}] {s.stack_repr:<60}  ⟂ {s.lookahead:<10}  act={s.action:>3}  {s.note}")
+        if len(steps) > 200:
+            print(f"... ({len(steps)-200} pasos más)")
+        sys.exit(1)
+    
+    
+    
     if ok:
         print("Cadena aceptada")
     else:
@@ -474,8 +563,8 @@ def main():
         print("=== Trazas (primeras 200) ===")
         for s in steps[:200]:
             print(f"[{s.step:03}] {s.stack_repr:<60}  ⟂ {s.lookahead:<10}  act={s.action:>3}  {s.note}")
-            if len(steps<200):
-                print(f". . . {len(steps)-200} Pasos más.")
+            if len(steps) > 200:
+                print(f". . . ({len(steps)-200} Pasos más.)")
         return
 
     print("=== Trazas (primeras 200) ===")

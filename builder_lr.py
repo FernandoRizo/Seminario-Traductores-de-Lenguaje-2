@@ -6,7 +6,7 @@ import sys
 # ===== 1) Definición de símbolos (DEBEN COINCIDIR CON compilador.csv) =====
 TERMINALS = [
     "tipo","identificador","entero","(",")","{","}",";",
-    ",","=","return","opSuma","$"
+    ",","=","return","opSuma","$","cadena"
 ]
 NONTERMINALS = [
     "Program","DeclList","Decl","VarDecl","FunDef","ParamListOpt","ParamList","Param",
@@ -82,6 +82,8 @@ R("ArgListOpt",    "ArgList")
 
 R("ArgList",       "Expr")
 R("ArgList",       "ArgList , Expr")
+R("Factor","cadena")
+R("Stmt","Expr ;")
 
 # Augment grammar: S' -> Program
 START = "Program"
@@ -274,3 +276,21 @@ with open("compilador.lr","w",encoding="utf-8") as f:
 
 print("Listo: compilador.lr generado.")
 print(f"Estados: {nrows}, Columnas: {ncols}")
+
+from builder_lr import TERMINALS, NONTERMINALS
+import csv, shutil
+
+syms = TERMINALS + NONTERMINALS  # 34 columnas esperadas
+# Asegura que la coma literal se escriba como "," en CSV
+def norm_name(s): return s if s != ',' else '","'
+
+with open('compilador.csv', newline='', encoding='utf-8') as f:
+    rows = list(csv.reader(f))
+shutil.copyfile('compilador.csv', 'compilador.csv.bak')
+
+rows[0] = [*TERMINALS, *NONTERMINALS]   # pone los nombres “crudos”
+with open('compilador.csv', 'w', newline='', encoding='utf-8') as f:
+    w = csv.writer(f)
+    w.writerows(rows)
+
+print('Cabecera corregida a:', TERMINALS + NONTERMINALS)

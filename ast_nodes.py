@@ -73,3 +73,12 @@ class FuncDef:
 class Program:
     type: str = "Program"
     funcs: List[FuncDef] = None
+
+
+@dataclass
+class String:
+    type: str = "String"
+    value: str = ""          # contenido sin comillas
+
+
+
